@@ -151,6 +151,86 @@ class XYModel2DFast:
         return np.stack([np.cos(self.theta), np.sin(self.theta)], axis=0)
 
 
+# ---------------------------------------------------------------
+# 데이터셋 생성 (개선 1: annealing / 개선 2: burn-in + decorrelation)
+# ---------------------------------------------------------------
+
+def generate_dataset(L=64, J=1.0, temperatures=None,
+                      n_burnin=1000, n_samples_per_T=20, sweeps_between=50,
+                      seed=None, verbose=True):
+    """
+    여러 온도에서 CNN 학습용 스핀 배치 데이터셋을 생성.
+
+    [개선 1] Simulated annealing 방식
+    ----------------------------------
+    온도마다 XYModel2DFast를 새로 만들지 않고, 모델 하나를 계속 재사용합니다.
+    즉 이전 온도에서 평형에 도달한 스핀 배치를 다음 온도의 "초기 상태"로
+    그대로 이어받습니다. T_BKT 근방은 critical slowing down 때문에 무작위
+    상태에서 평형까지 도달하는 데 훨씬 오래 걸리는데, 이전 온도의 평형 상태에서
+    출발하면 그보다 훨씬 적은 sweep으로도 평형에 도달합니다.
+
+    temperatures는 높은 온도 -> 낮은 온도 순으로 정렬해서 넘기는 걸 권장합니다
+    (뜨겁게 무질서화된 상태에서 시작해서 서서히 식히는 물리적으로 자연스러운 방향).
+
+    [개선 2] Burn-in과 decorrelation 분리
+    ----------------------------------------
+    각 온도에서:
+      1) n_burnin sweep 동안은 그냥 진행만 하고 저장하지 않음
+         (이 온도의 진짜 평형 상태에 도달할 시간을 줌)
+      2) 그 다음부터 n_samples_per_T개를 뽑되, 매번 sweeps_between sweep씩
+         추가로 진행한 뒤에 저장 (연속 sweep 간의 강한 상관관계를 줄여서
+         서로 통계적으로 "다른" 샘플이 되도록 함)
+
+    Parameters
+    ----------
+    temperatures : list[float]
+        샘플링할 온도 목록. 높은 온도 -> 낮은 온도 순 권장.
+    n_burnin : int
+        온도가 바뀐 뒤 평형 도달을 위해 버리는 sweep 수.
+    n_samples_per_T : int
+        온도 하나당 뽑을 샘플 개수.
+    sweeps_between : int
+        같은 온도에서 샘플 사이에 진행할 sweep 수 (decorrelation).
+
+    Returns
+    -------
+    list[dict]
+        각 원소는 {"T", "spin_config", "energy", "magnetization",
+                   "n_vortex", "n_antivortex"} 를 담은 딕셔너리.
+        spin_config는 CNN 입력용 (2, L, L) 배열 ((cos, sin) 채널).
+    """
+    if temperatures is None:
+        raise ValueError("temperatures 리스트를 지정해야 합니다")
+
+    model = XYModel2DFast(L=L, J=J, seed=seed)
+    dataset = []
+
+    for T in temperatures:
+        # --- burn-in: 이 온도의 평형 상태에 도달할 때까지 버림 ---
+        model.run(T, n_burnin)
+
+        # --- decorrelated 샘플 n_samples_per_T개 수집 ---
+        for _ in range(n_samples_per_T):
+            model.run(T, sweeps_between)
+
+            n_vortex, n_antivortex = model.count_vortices()
+            dataset.append({
+                "T": T,
+                "spin_config": model.spin_config_cos_sin(),
+                "energy": model.total_energy(),
+                "magnetization": model.magnetization(),
+                "n_vortex": n_vortex,
+                "n_antivortex": n_antivortex,
+            })
+
+        if verbose:
+            last = dataset[-1]
+            print(f"  T={T:.3f}  |M|={last['magnetization']:.3f}  "
+                  f"vortex={last['n_vortex']}  (샘플 {n_samples_per_T}개 수집)")
+
+    return dataset
+
+
 if __name__ == "__main__":
     L = 64
     T = 1.0
@@ -179,3 +259,27 @@ if __name__ == "__main__":
     print(f"평형화 후 에너지: {model.total_energy():.2f}, |M|: {model.magnetization():.3f}")
     print(f"vortex: {n_vortex}, antivortex: {n_antivortex}")
     print(f"CNN 입력 형태: {model.spin_config_cos_sin().shape}")
+
+    # ------------------------------------------------------------
+    # 데이터셋 생성 데모 (실제 15,000개 규모가 아니라 동작 확인용 소규모 예시)
+    # 고온 -> 저온 순으로 annealing, 각 온도마다 burn-in 후 decorrelated 샘플링
+    # ------------------------------------------------------------
+    print("\n=== 데이터셋 생성 데모 (annealing + burn-in/decorrelation) ===")
+    demo_temperatures = [1.60, 1.20, 1.00, 0.893, 0.70, 0.40]  # 고온 -> 저온, T_BKT 포함
+
+    t0 = time.perf_counter()
+    dataset = generate_dataset(
+        L=L, J=J,
+        temperatures=demo_temperatures,
+        n_burnin=300,        # 데모라 실제 생성보다 적게 잡음 (실전에서는 더 크게)
+        n_samples_per_T=5,
+        sweeps_between=30,
+        seed=123,
+        verbose=True,
+    )
+    elapsed = time.perf_counter() - t0
+
+    print(f"\n총 {len(dataset)}개 샘플 생성, 소요시간 {elapsed:.2f}초")
+    print(f"샘플 하나 예시: T={dataset[0]['T']}, "
+          f"spin_config shape={dataset[0]['spin_config'].shape}, "
+          f"|M|={dataset[0]['magnetization']:.3f}")
