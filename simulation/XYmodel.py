@@ -155,6 +155,16 @@ class XYModel2DFast:
 # 데이터셋 생성 (개선 1: annealing / 개선 2: burn-in + decorrelation)
 # ---------------------------------------------------------------
 
+def build_temperature_grid():
+    """T_BKT(~0.893) 근방에 촘촘한 비균일 온도 그리드 (고온 -> 저온 순)."""
+    low = np.linspace(0.30, 0.70, 5)
+    mid = np.linspace(0.75, 1.05, 13)   # T_BKT 근방 -- 촘촘하게
+    high = np.linspace(1.10, 1.80, 8)
+    grid = np.concatenate([low, mid, high])
+    grid = sorted(set(round(float(t), 3) for t in grid), reverse=True)
+    return grid
+
+
 def generate_dataset(L=64, J=1.0, temperatures=None,
                       n_burnin=1000, n_samples_per_T=20, sweeps_between=50,
                       seed=None, verbose=True):
