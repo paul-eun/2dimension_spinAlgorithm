@@ -1,17 +1,22 @@
 """
-2D XY Model - Numba 가속 Monte Carlo Metropolis (L=64 스케일업 버전)
+2D XY Model - Numba 가속 Wolff Cluster Algorithm (L=64 스케일업 버전)
 =====================================================================
 
-이전 프로토타입(xy_model_mc.py, L=10, 순수 Python)과 물리/알고리즘은
-완전히 동일합니다. 차이는 성능뿐입니다:
+기존 Metropolis 버전(스핀을 1개씩 흔들어보는 방식)을 Wolff 클러스터
+알고리즘으로 교체한 버전입니다.
 
-    - metropolis_sweep의 핵심 루프를 @njit으로 JIT 컴파일
-    - vortex(winding number) 계산도 @njit으로 가속
-    - L=10 -> L=64 (스핀 개수 100개 -> 4096개)로 확장해도 실용적인 속도 유지
+    - 반사축(n_hat)을 무작위로 정한 뒤, 씨앗 스핀에서부터 확률적으로
+      클러스터를 키우고, 클러스터 전체를 한 번에 거울 반사시킵니다.
+    - 이 결합 확률(p_add)식이 클러스터를 뒤집어도 볼츠만 분포를
+      정확히 따른다는 것을 수학적으로 보장합니다.
+    - Metropolis 대비 상관관계가 낮은 샘플을 훨씬 적은 sweep으로 얻을
+      수 있어 burn-in/decorrelation에 필요한 계산량이 크게 줄어듭니다.
 
 주의: Numba의 @njit 함수 안에서는 np.random.default_rng()가 아니라
       np.random.random(), np.random.randint() 같은 numba 자체 RNG를 씁니다.
       (numpy의 Generator 객체는 nopython 모드에서 지원 안 됨)
+
+(AI의 도움을 받았다)
 """
 
 import time
@@ -20,44 +25,87 @@ from numba import njit
 
 
 # ---------------------------------------------------------------
-# Numba 가속 핵심 함수들
+# Numba 가속 Wolff 알고리즘 핵심 로직
 # ---------------------------------------------------------------
 
 @njit(cache=True)
-def _local_energy_delta(theta, L, i, j, old_theta, new_theta, J):
-    up = theta[(i - 1) % L, j]
-    down = theta[(i + 1) % L, j]
-    left = theta[i, (j - 1) % L]
-    right = theta[i, (j + 1) % L]
+def _wolff_step_numba(theta, T, J):
+    """2D XY 모델 1회 Wolff Cluster Update (in-place modification)"""
+    L = theta.shape[0]
 
-    sum_cos = np.cos(up) + np.cos(down) + np.cos(left) + np.cos(right)
-    sum_sin = np.sin(up) + np.sin(down) + np.sin(left) + np.sin(right)
+    # 1. 무작위 반사 축(Random Projection Vector) n_hat 선택
+    phi_n = np.random.random() * 2.0 * np.pi
+    nx = np.cos(phi_n)
+    ny = np.sin(phi_n)
 
-    E_old = -J * (np.cos(old_theta) * sum_cos + np.sin(old_theta) * sum_sin)
-    E_new = -J * (np.cos(new_theta) * sum_cos + np.sin(new_theta) * sum_sin)
-    return E_new - E_old
+    # 2. 씨앗(Seed) 스핀 무작위 선택
+    i0 = np.random.randint(0, L)
+    j0 = np.random.randint(0, L)
+
+    visited = np.zeros((L, L), dtype=np.bool_)
+    stack_i = np.empty(L * L, dtype=np.int32)
+    stack_j = np.empty(L * L, dtype=np.int32)
+
+    stack_i[0] = i0
+    stack_j[0] = j0
+    visited[i0, j0] = True
+    stack_ptr = 1
+    cluster_size = 0
+
+    di = np.array([-1, 1, 0, 0], dtype=np.int32)
+    dj = np.array([0, 0, -1, 1], dtype=np.int32)
+
+    # 3. 클러스터 성장 (BFS/DFS Stack)
+    while stack_ptr > 0:
+        stack_ptr -= 1
+        curr_i = stack_i[stack_ptr]
+        curr_j = stack_j[stack_ptr]
+        cluster_size += 1
+
+        curr_angle = theta[curr_i, curr_j]
+        S_dot_n = np.cos(curr_angle) * nx + np.sin(curr_angle) * ny
+
+        for k in range(4):
+            ni = (curr_i + di[k]) % L
+            nj = (curr_j + dj[k]) % L
+
+            if not visited[ni, nj]:
+                neighbor_angle = theta[ni, nj]
+                S_nbr_dot_n = np.cos(neighbor_angle) * nx + np.sin(neighbor_angle) * ny
+
+                # XY 모델 Wolff Bond 결합 확률
+                dot_product = S_dot_n * S_nbr_dot_n
+                if dot_product > 0:
+                    p_add = 1.0 - np.exp(-2.0 * J * dot_product / T)
+                    if np.random.random() < p_add:
+                        visited[ni, nj] = True
+                        stack_i[stack_ptr] = ni
+                        stack_j[stack_ptr] = nj
+                        stack_ptr += 1
+
+    # 4. 클러스터에 속한 모든 스핀 n_hat 축 기준 반사
+    for i in range(L):
+        for j in range(L):
+            if visited[i, j]:
+                theta[i, j] = (2.0 * phi_n - theta[i, j] + np.pi) % (2.0 * np.pi)
+
+    return cluster_size
 
 
 @njit(cache=True)
-def _metropolis_sweep_numba(theta, T, J, delta_max):
-    """L*L번의 단일 스핀 업데이트 시도 (1 sweep). theta 배열을 in-place로 수정."""
+def _wolff_sweep_numba(theta, T, J):
+    """누적 뒤집힌 스핀 수 >= L*L 이 될 때까지 Wolff step을 수행하는 1 Sweep 정의"""
     L = theta.shape[0]
     N = L * L
-    accepted = 0
+    flipped_spins = 0
+    steps = 0
 
-    for _ in range(N):
-        i = np.random.randint(0, L)
-        j = np.random.randint(0, L)
-        old_theta = theta[i, j]
-        new_theta = (old_theta + (np.random.random() * 2.0 - 1.0) * delta_max) % (2.0 * np.pi)
+    while flipped_spins < N:
+        c_size = _wolff_step_numba(theta, T, J)
+        flipped_spins += c_size
+        steps += 1
 
-        dE = _local_energy_delta(theta, L, i, j, old_theta, new_theta, J)
-
-        if dE <= 0.0 or np.random.random() < np.exp(-dE / T):
-            theta[i, j] = new_theta
-            accepted += 1
-
-    return accepted / N
+    return steps  # 1 sweep에 소요된 cluster step 수 반환
 
 
 @njit(cache=True)
@@ -109,8 +157,14 @@ def _count_vortices_numba(theta):
 
 
 # ---------------------------------------------------------------
-# 사용자 인터페이스 클래스 (이전 XYModel2D와 동일한 API 유지)
+# 사용자 인터페이스 클래스 (Wolff 적용 버전)
 # ---------------------------------------------------------------
+
+@njit(cache=True)
+def _seed_numba(seed):
+    # numba RNG는 NumPy RNG와 별개라서, 반드시 njit 함수 안에서 시드를 줘야 함
+    np.random.seed(seed)
+
 
 class XYModel2DFast:
     def __init__(self, L=64, J=1.0, seed=None):
@@ -118,21 +172,21 @@ class XYModel2DFast:
         self.N = L * L
         self.J = J
         if seed is not None:
-            np.random.seed(seed)  # numba의 njit 함수들이 참조하는 전역 RNG 시드
+            np.random.seed(seed)   # 초기 배치(아래 uniform)용 NumPy RNG
+            _seed_numba(seed)      # Wolff 업데이트용 numba RNG
         self.theta = np.random.uniform(0, 2 * np.pi, size=(L, L))
 
-    def metropolis_sweep(self, T, delta_max=None):
-        if delta_max is None:
-            delta_max = max(0.4, min(2.5, T * 1.8))  # 온도에 비례한 자동 조절
-        return _metropolis_sweep_numba(self.theta, T, self.J, delta_max)
+    def wolff_sweep(self, T):
+        """Metropolis sweep 대신 Wolff sweep 수행"""
+        return _wolff_sweep_numba(self.theta, T, self.J)
 
-    def run(self, T, n_sweeps, delta_max=None, verbose=False):
-        rates = np.empty(n_sweeps)
+    def run(self, T, n_sweeps, verbose=False):
+        steps_list = np.empty(n_sweeps)
         for s in range(n_sweeps):
-            rates[s] = self.metropolis_sweep(T, delta_max=delta_max)
+            steps_list[s] = self.wolff_sweep(T)
             if verbose and (s + 1) % max(1, n_sweeps // 10) == 0:
-                print(f"  sweep {s+1}/{n_sweeps}  accept_rate={rates[s]:.3f}")
-        return rates
+                print(f"  sweep {s+1}/{n_sweeps} 완료 (스텝 수: {steps_list[s]:.0f})")
+        return steps_list
 
     def total_energy(self):
         return _total_energy_numba(self.theta, self.J)
@@ -152,44 +206,29 @@ class XYModel2DFast:
 
 
 # ---------------------------------------------------------------
-# 데이터셋 생성 (개선 1: annealing / 개선 2: burn-in + decorrelation)
+# 데이터셋 생성 (Wolff 알고리즘에 맞게 간소화된 burn-in/decorrelation)
 # ---------------------------------------------------------------
 
 def build_temperature_grid():
-    """T_BKT(~0.893) 근방에 촘촘한 비균일 온도 그리드 (고온 -> 저온 순)."""
-    low = np.linspace(0.30, 0.70, 5)
-    mid = np.linspace(0.75, 1.05, 13)   # T_BKT 근방 -- 촘촘하게
-    high = np.linspace(1.10, 1.80, 8)
-    grid = np.concatenate([low, mid, high])
+    """0.30~1.80 구간을 0.025 간격으로 촘촘한 균일 온도 그리드 (고온 -> 저온 순)."""
+    n_points = round((1.80 - 0.30) / 0.025) + 1  # 61개
+    grid = np.linspace(0.30, 1.80, n_points)
     grid = sorted(set(round(float(t), 3) for t in grid), reverse=True)
     return grid
 
 
 def generate_dataset(L=64, J=1.0, temperatures=None,
-                      n_burnin=1000, n_samples_per_T=20, sweeps_between=50,
+                      n_burnin=50, n_samples_per_T=20, sweeps_between=5,
                       seed=None, verbose=True):
     """
-    여러 온도에서 CNN 학습용 스핀 배치 데이터셋을 생성.
+    Wolff 알고리즘을 사용한 고품질 데이터셋 생성.
 
-    [개선 1] Simulated annealing 방식
-    ----------------------------------
-    온도마다 XYModel2DFast를 새로 만들지 않고, 모델 하나를 계속 재사용합니다.
-    즉 이전 온도에서 평형에 도달한 스핀 배치를 다음 온도의 "초기 상태"로
-    그대로 이어받습니다. T_BKT 근방은 critical slowing down 때문에 무작위
-    상태에서 평형까지 도달하는 데 훨씬 오래 걸리는데, 이전 온도의 평형 상태에서
-    출발하면 그보다 훨씬 적은 sweep으로도 평형에 도달합니다.
+    Wolff 특성상 평형 도달과 decorrelation이 압도적으로 빨라, Metropolis
+    버전에서 쓰던 n_burnin(1000)/sweeps_between(40~50) 값을 대폭 낮추어도
+    (기본값 50/5) 충분히 독립적인 샘플을 얻을 수 있습니다.
 
     temperatures는 높은 온도 -> 낮은 온도 순으로 정렬해서 넘기는 걸 권장합니다
     (뜨겁게 무질서화된 상태에서 시작해서 서서히 식히는 물리적으로 자연스러운 방향).
-
-    [개선 2] Burn-in과 decorrelation 분리
-    ----------------------------------------
-    각 온도에서:
-      1) n_burnin sweep 동안은 그냥 진행만 하고 저장하지 않음
-         (이 온도의 진짜 평형 상태에 도달할 시간을 줌)
-      2) 그 다음부터 n_samples_per_T개를 뽑되, 매번 sweeps_between sweep씩
-         추가로 진행한 뒤에 저장 (연속 sweep 간의 강한 상관관계를 줄여서
-         서로 통계적으로 "다른" 샘플이 되도록 함)
 
     Parameters
     ----------
@@ -216,7 +255,7 @@ def generate_dataset(L=64, J=1.0, temperatures=None,
     dataset = []
 
     for T in temperatures:
-        # --- burn-in: 이 온도의 평형 상태에 도달할 때까지 버림 ---
+        # --- burn-in: Wolff 알고리즘은 평형 도달이 압도적으로 빨라 50 sweep이면 충분함 ---
         model.run(T, n_burnin)
 
         # --- decorrelated 샘플 n_samples_per_T개 수집 ---
@@ -236,7 +275,7 @@ def generate_dataset(L=64, J=1.0, temperatures=None,
         if verbose:
             last = dataset[-1]
             print(f"  T={T:.3f}  |M|={last['magnetization']:.3f}  "
-                  f"vortex={last['n_vortex']}  (샘플 {n_samples_per_T}개 수집)")
+                  f"vortex={last['n_vortex']}  (샘플 {n_samples_per_T}개 수집 완료)")
 
     return dataset
 
@@ -246,11 +285,11 @@ if __name__ == "__main__":
     T = 1.0
     J = 1.0
 
-    print(f"=== L={L} ({L*L}개 스핀), Numba 가속 버전 ===\n")
+    print(f"=== L={L} ({L*L}개 스핀), Numba Wolff 가속 버전 ===\n")
 
     # 1) JIT 컴파일 워밍업 (첫 호출은 컴파일 시간 포함되므로 별도로 시간 측정)
     warmup = XYModel2DFast(L=8, J=J, seed=0)
-    warmup.metropolis_sweep(T)
+    warmup.wolff_sweep(T)
     warmup.count_vortices()
     warmup.total_energy()
 
@@ -258,7 +297,7 @@ if __name__ == "__main__":
     model = XYModel2DFast(L=L, J=J, seed=42)
     print(f"초기 에너지: {model.total_energy():.2f}, 초기 |M|: {model.magnetization():.3f}")
 
-    n_sweeps = 2000
+    n_sweeps = 500  # Wolff 알고리즘은 500 sweep으로도 평형화에 충분함
     t0 = time.perf_counter()
     model.run(T=T, n_sweeps=n_sweeps, verbose=True)
     elapsed = time.perf_counter() - t0
@@ -271,19 +310,19 @@ if __name__ == "__main__":
     print(f"CNN 입력 형태: {model.spin_config_cos_sin().shape}")
 
     # ------------------------------------------------------------
-    # 데이터셋 생성 데모 (실제 15,000개 규모가 아니라 동작 확인용 소규모 예시)
+    # 데이터셋 생성 데모 (실제 규모가 아니라 동작 확인용 소규모 예시)
     # 고온 -> 저온 순으로 annealing, 각 온도마다 burn-in 후 decorrelated 샘플링
     # ------------------------------------------------------------
-    print("\n=== 데이터셋 생성 데모 (annealing + burn-in/decorrelation) ===")
+    print("\n=== Wolff 기반 데이터셋 생성 데모 ===")
     demo_temperatures = [1.60, 1.20, 1.00, 0.893, 0.70, 0.40]  # 고온 -> 저온, T_BKT 포함
 
     t0 = time.perf_counter()
     dataset = generate_dataset(
         L=L, J=J,
         temperatures=demo_temperatures,
-        n_burnin=300,        # 데모라 실제 생성보다 적게 잡음 (실전에서는 더 크게)
+        n_burnin=50,         # Wolff 알고리즘이므로 50으로도 대폭 감소 가능
         n_samples_per_T=5,
-        sweeps_between=30,
+        sweeps_between=5,    # 단 5 sweep만으로도 충분히 독립적인 샘플 생성
         seed=123,
         verbose=True,
     )

@@ -1,10 +1,23 @@
 """
-전체 파이프라인: XY 모델 시뮬레이션 데이터 생성 -> CNN 학습 -> 평가
+전체 파이프라인: 저장된 XY 모델 데이터 로드 -> CNN 학습 -> 평가
 
-simulation/xy_model_numba.py 를 import해서 데이터를 만들고,
-그 결과를 cnn/dataset.py 로 감싸서 cnn/model.py 로 학습합니다.
+data/generate_data.py 가 저장한 data/xy_dataset_<번호>.npz 들을 불러와서
+cnn/dataset.py 로 감싸고 cnn/model.py 로 학습합니다.
+
+데이터 분할:
+    - validation: 파일 하나를 통째로 사용 (기본: 가장 마지막 번호).
+                  학습 파일과 독립적으로 시뮬레이션된 스핀 배치임.
+    - test      : 무작위로 고른 온도들의 샘플 (모든 파일에서).
+                  이 온도들은 train/val 어디에도 들어가지 않음.
+    - train     : validation 파일을 뺀 나머지 파일들의 (test 온도 외) 샘플
+
+실행:
+    python CNN/train.py            # 가장 마지막 번호 파일을 validation으로
+    python CNN/train.py --val 1    # 1번 파일을 validation으로
+    python CNN/train.py --quick    # 파일 없이 소규모 데이터를 즉석 생성해서 동작만 빠르게 확인
 """
 
+import argparse
 import os
 import sys
 import time
@@ -14,14 +27,14 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-# simulation/ 폴더를 import 경로에 추가 (quick_test 모드에서만 실제로 필요)
+# simulation/, data/ 폴더를 import 경로에 추가
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "simulation"))
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", "data"))
 from xy_model_numba import generate_dataset, build_temperature_grid  # noqa: E402
+from generate_data import dataset_path, existing_dataset_indices  # noqa: E402
 
 from dataset import XYSpinDataset, split_by_temperature, load_dataset_npz  # noqa: E402
 from model import XYTemperatureCNN  # noqa: E402
-
-DATA_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "xy_dataset.npz")
 
 
 def train_one_epoch(model, loader, optimizer, criterion, device):
@@ -57,8 +70,33 @@ def evaluate(model, loader, criterion, device):
     return mse, mae, pred, true
 
 
-def main(L=64, n_burnin=800, n_samples_per_T=15, sweeps_between=40,
-         n_epochs=30, batch_size=32, lr=1e-3, seed=42, quick_test=False):
+def load_train_val_files(val_index=None):
+    """저장된 데이터 파일들을 (학습용 샘플, validation 샘플)로 나눠서 불러옴."""
+    indices = existing_dataset_indices()
+    if len(indices) < 2:
+        raise FileNotFoundError(
+            f"데이터 파일이 {len(indices)}개뿐입니다 (학습용 + validation용 최소 2개 필요).\n"
+            f"'python data/generate_data.py'를 {2 - len(indices)}번 더 실행하세요."
+        )
+    if val_index is None:
+        val_index = indices[-1]
+    if val_index not in indices:
+        raise ValueError(f"validation으로 지정한 {val_index}번 파일이 없습니다 (있는 번호: {indices})")
+
+    train_samples = []
+    for k in indices:
+        if k != val_index:
+            train_samples += load_dataset_npz(dataset_path(k))
+    val_samples = load_dataset_npz(dataset_path(val_index))
+
+    train_files = [k for k in indices if k != val_index]
+    print(f"\n학습 파일: {train_files} ({len(train_samples)}개 샘플)")
+    print(f"validation 파일: [{val_index}] ({len(val_samples)}개 샘플)")
+    return train_samples, val_samples
+
+
+def main(L=64, n_epochs=30, batch_size=32, lr=1e-3, seed=42,
+         quick_test=False, val_index=None):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"device: {device}")
@@ -66,36 +104,34 @@ def main(L=64, n_burnin=800, n_samples_per_T=15, sweeps_between=40,
     # ---------- 1) 데이터 준비 ----------
     if quick_test:
         # 빠른 동작 확인용: 파일 없이 즉석에서 축소 규모로 생성
+        # (학습용과 validation용을 서로 다른 seed로 따로 시뮬레이션)
         temperatures = build_temperature_grid()[::4]
-        n_burnin, n_samples_per_T, sweeps_between = 100, 4, 10
         print(f"\n[quick_test 모드] 온도 그리드 ({len(temperatures)}개): {temperatures}")
         t0 = time.perf_counter()
-        samples = generate_dataset(
-            L=L, J=1.0, temperatures=temperatures,
-            n_burnin=n_burnin, n_samples_per_T=n_samples_per_T,
-            sweeps_between=sweeps_between, seed=seed, verbose=True,
-        )
-        print(f"\n데이터 생성 완료: {len(samples)}개 샘플, "
+        train_pool, val_pool = [
+            generate_dataset(
+                L=L, J=1.0, temperatures=temperatures,
+                n_burnin=100, n_samples_per_T=4, sweeps_between=10,
+                seed=s, verbose=False,
+            )
+            for s in (1, 2)
+        ]
+        print(f"데이터 생성 완료: 학습용 {len(train_pool)}개 + validation용 {len(val_pool)}개, "
               f"{time.perf_counter()-t0:.1f}초 소요")
     else:
-        # 실전 모드: 미리 저장해둔 데이터 파일을 불러옴 (재시뮬레이션 안 함)
-        if not os.path.exists(DATA_PATH):
-            raise FileNotFoundError(
-                f"데이터 파일이 없습니다: {DATA_PATH}\n"
-                f"먼저 'data/generate_data.py'를 실행해서 데이터를 생성하세요."
-            )
-        samples = load_dataset_npz(DATA_PATH)
-        print(f"\n데이터 파일 로드 완료: {DATA_PATH} ({len(samples)}개 샘플)")
+        # 실전 모드: 미리 저장해둔 데이터 파일들을 불러옴 (재시뮬레이션 안 함)
+        train_pool, val_pool = load_train_val_files(val_index)
 
-    # ---------- 2) train/val/test 분할 (온도 단위 분할) ----------
-    all_temps = sorted(set(round(s["T"], 3) for s in samples))
+    # ---------- 2) test 온도 분리 (온도 단위) ----------
+    all_temps = sorted(set(round(s["T"], 3) for s in train_pool))
     n_test_temps = max(1, len(all_temps) // 6)
     rng = np.random.default_rng(seed)
     test_temps = rng.choice(all_temps, size=n_test_temps, replace=False).tolist()
 
-    train_samples, val_samples, test_samples = split_by_temperature(
-        samples, test_temperatures=test_temps, val_fraction=0.15, seed=seed
-    )
+    # test 온도는 train/val 양쪽에서 모두 빼고, 두 쪽의 해당 샘플을 모두 test로 사용
+    train_samples, test_from_train = split_by_temperature(train_pool, test_temps)
+    val_samples, test_from_val = split_by_temperature(val_pool, test_temps)
+    test_samples = test_from_train + test_from_val
     print(f"\ntrain={len(train_samples)}  val={len(val_samples)}  "
           f"test={len(test_samples)} (test 온도: {sorted(test_temps)})")
 
@@ -133,5 +169,14 @@ def main(L=64, n_burnin=800, n_samples_per_T=15, sweeps_between=40,
 
 
 if __name__ == "__main__":
-    # 기본은 빠른 동작 확인 모드 (실제 15,000개 규모는 quick_test=False로 별도 실행)
-    main(quick_test=True, n_epochs=15)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--quick", action="store_true",
+                        help="파일 없이 소규모 데이터를 즉석 생성해서 동작만 빠르게 확인")
+    parser.add_argument("--val", type=int, default=None,
+                        help="validation으로 쓸 데이터 파일 번호 (기본: 가장 마지막 번호)")
+    args = parser.parse_args()
+
+    if args.quick:
+        main(quick_test=True, n_epochs=15)
+    else:
+        main(val_index=args.val)
