@@ -9,10 +9,16 @@ data/xy_dataset_<번호>.npz 파일로 저장.
 
 train.py는 이 파일들 중 하나를 validation 전용으로, 나머지를 학습용으로 씀.
 
+test용 데이터는 --test 옵션으로 따로 생성해서 data/xy_testset.npz 로 저장.
+test 온도(TEST_TEMPERATURES)는 학습 온도 그리드(0.025 간격) 사이의 온도라
+학습/검증 데이터와 온도가 절대 겹치지 않음.
+
 실행:
-    python data/generate_data.py
+    python data/generate_data.py          # 학습/검증용 xy_dataset_<다음 번호>.npz
+    python data/generate_data.py --test   # test용 xy_testset.npz
 """
 
+import argparse
 import os
 import re
 import sys
@@ -26,6 +32,13 @@ from xy_model_numba import generate_dataset, build_temperature_grid  # noqa: E40
 
 
 DATA_DIR = os.path.dirname(os.path.abspath(__file__))
+TEST_PATH = os.path.join(DATA_DIR, "xy_testset.npz")
+
+# 학습 그리드(0.300, 0.325, ..., 1.800)의 정확히 한가운데 온도들, 0.15 간격
+# (0.8125, 0.9625가 T_BKT ~ 0.893 양옆)
+TEST_TEMPERATURES = [0.3625, 0.5125, 0.6625, 0.8125, 0.9625,
+                     1.1125, 1.2625, 1.4125, 1.5625, 1.7125]
+TEST_SEED = 0   # 학습/검증 파일의 seed(= 파일 번호 1, 2, ...)와 겹치지 않도록
 
 
 def dataset_path(index):
@@ -46,6 +59,29 @@ def next_dataset_index():
     """지금까지 만든 가장 큰 번호 + 1 (중간 파일을 지워도 번호가 생성 순서를 유지)."""
     indices = existing_dataset_indices()
     return indices[-1] + 1 if indices else 1
+
+
+def save_samples(samples, out_path):
+    """generate_dataset() 결과(list[dict])를 배열로 정리해서 npz 하나에 압축 저장."""
+    spin_configs = np.stack([s["spin_config"] for s in samples]).astype(np.float32)
+    temps = np.array([s["T"] for s in samples], dtype=np.float32)
+    energies = np.array([s["energy"] for s in samples], dtype=np.float32)
+    mags = np.array([s["magnetization"] for s in samples], dtype=np.float32)
+    n_vortex = np.array([s["n_vortex"] for s in samples], dtype=np.int32)
+    n_antivortex = np.array([s["n_antivortex"] for s in samples], dtype=np.int32)
+
+    np.savez_compressed(
+        out_path,
+        spin_configs=spin_configs,
+        temperatures=temps,
+        energies=energies,
+        magnetizations=mags,
+        n_vortex=n_vortex,
+        n_antivortex=n_antivortex,
+    )
+
+    size_mb = os.path.getsize(out_path) / 1e6
+    print(f"\n저장 완료: {out_path} ({size_mb:.1f} MB)")
 
 
 def main(L=64, n_burnin=50, n_samples_per_T=60, sweeps_between=5):
@@ -70,29 +106,43 @@ def main(L=64, n_burnin=50, n_samples_per_T=60, sweeps_between=5):
     elapsed = time.perf_counter() - t0
     print(f"\n총 {len(samples)}개 샘플 생성, {elapsed:.1f}초 소요")
 
-    # list[dict] -> 배열로 정리해서 npz 하나에 압축 저장
-    spin_configs = np.stack([s["spin_config"] for s in samples]).astype(np.float32)
-    temps = np.array([s["T"] for s in samples], dtype=np.float32)
-    energies = np.array([s["energy"] for s in samples], dtype=np.float32)
-    mags = np.array([s["magnetization"] for s in samples], dtype=np.float32)
-    n_vortex = np.array([s["n_vortex"] for s in samples], dtype=np.int32)
-    n_antivortex = np.array([s["n_antivortex"] for s in samples], dtype=np.int32)
+    save_samples(samples, dataset_path(index))
 
-    out_path = dataset_path(index)
 
-    np.savez_compressed(
-        out_path,
-        spin_configs=spin_configs,
-        temperatures=temps,
-        energies=energies,
-        magnetizations=mags,
-        n_vortex=n_vortex,
-        n_antivortex=n_antivortex,
+def main_test(L=64, n_burnin=200, n_samples_per_T=120, sweeps_between=5):
+    """
+    test용 데이터셋 생성 -> data/xy_testset.npz (이미 있으면 덮어씀; seed 고정이라 내용은 항상 같음)
+
+    test 온도끼리는 0.15씩 떨어져 있어서(학습 그리드는 0.025),
+    온도를 바꾼 뒤 평형에 도달하도록 burn-in을 학습용보다 길게 줌.
+    """
+    temperatures = sorted(TEST_TEMPERATURES, reverse=True)   # 고온 -> 저온
+    print(f"test 데이터셋 생성 (seed={TEST_SEED})")
+    print(f"test 온도 ({len(temperatures)}개): {temperatures}")
+
+    t0 = time.perf_counter()
+    samples = generate_dataset(
+        L=L, J=1.0,
+        temperatures=temperatures,
+        n_burnin=n_burnin,
+        n_samples_per_T=n_samples_per_T,
+        sweeps_between=sweeps_between,
+        seed=TEST_SEED,
+        verbose=True,
     )
+    elapsed = time.perf_counter() - t0
+    print(f"\n총 {len(samples)}개 샘플 생성, {elapsed:.1f}초 소요")
 
-    size_mb = os.path.getsize(out_path) / 1e6
-    print(f"\n저장 완료: {out_path} ({size_mb:.1f} MB)")
+    save_samples(samples, TEST_PATH)
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--test", action="store_true",
+                        help="학습 그리드 사이 온도에서 test용 데이터셋(xy_testset.npz) 생성")
+    args = parser.parse_args()
+
+    if args.test:
+        main_test()
+    else:
+        main()

@@ -62,24 +62,3 @@ def load_dataset_npz(path):
             "n_antivortex": int(n_antivortex[i]),
         })
     return samples
-
-
-def split_by_temperature(samples, test_temperatures):
-    """
-    test 온도에 해당하는 샘플만 통째로 떼어냄 -> (나머지, test)
-
-    같은 온도에서 뽑힌 여러 샘플들은 서로 비슷하기 때문에(특히
-    decorrelation이 완벽하지 않으면), 같은 온도의 샘플이 train과
-    test에 동시에 섞여 들어가면 일반화 성능을 과대평가하게 됨.
-    그래서 "샘플 단위"가 아니라 "온도 단위"로 test를 미리 통째로 떼어냄.
-    (validation은 train.py에서 아예 별도로 생성된 파일을 사용)
-
-    Parameters
-    ----------
-    test_temperatures : list[float]
-        테스트용으로 완전히 분리할 온도 값들 (학습에 전혀 사용 안 함)
-    """
-    test_set = set(round(t, 6) for t in test_temperatures)
-    rest = [s for s in samples if round(s["T"], 6) not in test_set]
-    test = [s for s in samples if round(s["T"], 6) in test_set]
-    return rest, test
