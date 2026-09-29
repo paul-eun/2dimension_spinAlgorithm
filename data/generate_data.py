@@ -92,7 +92,7 @@ def save_samples(samples, out_path, seed):
     print(f"\n저장 완료: {out_path} ({size_mb:.1f} MB)")
 
 
-def main(L=64, n_burnin=50, n_samples_per_T=60, sweeps_between=5, seed=None):
+def main(L=64, n_burnin=50, n_samples_per_T=60, sweeps_between=8, seed=None):
 
     index = next_dataset_index()
     if seed is None:
@@ -118,7 +118,7 @@ def main(L=64, n_burnin=50, n_samples_per_T=60, sweeps_between=5, seed=None):
     save_samples(samples, dataset_path(index), seed)
 
 
-def main_test(L=64, n_burnin=200, n_samples_per_T=120, sweeps_between=5, seed=None):
+def main_test(L=64, n_burnin=200, n_samples_per_T=120, sweeps_between=8, seed=None):
     """
     test용 데이터셋 생성 -> data/xy_testset.npz (이미 있으면 덮어씀)
 
