@@ -4,8 +4,9 @@ data/xy_dataset_<번호>.npz 파일로 저장.
 
 실행할 때마다 기존 파일을 덮어쓰지 않고 다음 번호로 저장함
 (xy_dataset_1.npz, xy_dataset_2.npz, ...).
-각 파일은 seed = 번호 로 생성되므로 파일끼리는 서로 독립적인 데이터이고,
-같은 번호는 언제 다시 만들어도 똑같이 재현됨.
+seed는 실행할 때마다 무작위로 정해지므로 매번 새로운 데이터가 만들어지고,
+사용한 seed는 npz 파일 안에 "seed"로 함께 저장됨.
+같은 데이터를 재현하려면 그 값을 --seed로 넘기면 됨.
 
 train.py는 이 파일들 중 하나를 validation 전용으로, 나머지를 학습용으로 씀.
 
@@ -14,13 +15,15 @@ test 온도(TEST_TEMPERATURES)는 학습 온도 그리드(0.025 간격) 사이�
 학습/검증 데이터와 온도가 절대 겹치지 않음.
 
 실행:
-    python data/generate_data.py          # 학습/검증용 xy_dataset_<다음 번호>.npz
-    python data/generate_data.py --test   # test용 xy_testset.npz
+    python data/generate_data.py                 # 학습/검증용 xy_dataset_<다음 번호>.npz
+    python data/generate_data.py --test          # test용 xy_testset.npz
+    python data/generate_data.py --seed 12345    # 특정 seed로 재현 (--test와 같이 써도 됨)
 """
 
 import argparse
 import os
 import re
+import secrets
 import sys
 import time
 
@@ -38,7 +41,6 @@ TEST_PATH = os.path.join(DATA_DIR, "xy_testset.npz")
 # (0.8125, 0.9625가 T_BKT ~ 0.893 양옆)
 TEST_TEMPERATURES = [0.3625, 0.5125, 0.6625, 0.8125, 0.9625,
                      1.1125, 1.2625, 1.4125, 1.5625, 1.7125]
-TEST_SEED = 0   # 학습/검증 파일의 seed(= 파일 번호 1, 2, ...)와 겹치지 않도록
 
 
 def dataset_path(index):
@@ -61,7 +63,12 @@ def next_dataset_index():
     return indices[-1] + 1 if indices else 1
 
 
-def save_samples(samples, out_path):
+def random_seed():
+    """OS 난수로 정한 seed (numba/NumPy RNG가 받는 32비트 범위)."""
+    return secrets.randbits(32)
+
+
+def save_samples(samples, out_path, seed):
     """generate_dataset() 결과(list[dict])를 배열로 정리해서 npz 하나에 압축 저장."""
     spin_configs = np.stack([s["spin_config"] for s in samples]).astype(np.float32)
     temps = np.array([s["T"] for s in samples], dtype=np.float32)
@@ -78,16 +85,18 @@ def save_samples(samples, out_path):
         magnetizations=mags,
         n_vortex=n_vortex,
         n_antivortex=n_antivortex,
+        seed=np.array(seed, dtype=np.int64),   # 재현용으로 사용한 seed 기록
     )
 
     size_mb = os.path.getsize(out_path) / 1e6
     print(f"\n저장 완료: {out_path} ({size_mb:.1f} MB)")
 
 
-def main(L=64, n_burnin=50, n_samples_per_T=60, sweeps_between=5):
+def main(L=64, n_burnin=50, n_samples_per_T=60, sweeps_between=5, seed=None):
 
     index = next_dataset_index()
-    seed = index
+    if seed is None:
+        seed = random_seed()
     print(f"데이터셋 #{index} 생성 (seed={seed})")
 
     temperatures = build_temperature_grid()
@@ -106,18 +115,20 @@ def main(L=64, n_burnin=50, n_samples_per_T=60, sweeps_between=5):
     elapsed = time.perf_counter() - t0
     print(f"\n총 {len(samples)}개 샘플 생성, {elapsed:.1f}초 소요")
 
-    save_samples(samples, dataset_path(index))
+    save_samples(samples, dataset_path(index), seed)
 
 
-def main_test(L=64, n_burnin=200, n_samples_per_T=120, sweeps_between=5):
+def main_test(L=64, n_burnin=200, n_samples_per_T=120, sweeps_between=5, seed=None):
     """
-    test용 데이터셋 생성 -> data/xy_testset.npz (이미 있으면 덮어씀; seed 고정이라 내용은 항상 같음)
+    test용 데이터셋 생성 -> data/xy_testset.npz (이미 있으면 덮어씀)
 
     test 온도끼리는 0.15씩 떨어져 있어서(학습 그리드는 0.025),
     온도를 바꾼 뒤 평형에 도달하도록 burn-in을 학습용보다 길게 줌.
     """
+    if seed is None:
+        seed = random_seed()
     temperatures = sorted(TEST_TEMPERATURES, reverse=True)   # 고온 -> 저온
-    print(f"test 데이터셋 생성 (seed={TEST_SEED})")
+    print(f"test 데이터셋 생성 (seed={seed})")
     print(f"test 온도 ({len(temperatures)}개): {temperatures}")
 
     t0 = time.perf_counter()
@@ -127,22 +138,24 @@ def main_test(L=64, n_burnin=200, n_samples_per_T=120, sweeps_between=5):
         n_burnin=n_burnin,
         n_samples_per_T=n_samples_per_T,
         sweeps_between=sweeps_between,
-        seed=TEST_SEED,
+        seed=seed,
         verbose=True,
     )
     elapsed = time.perf_counter() - t0
     print(f"\n총 {len(samples)}개 샘플 생성, {elapsed:.1f}초 소요")
 
-    save_samples(samples, TEST_PATH)
+    save_samples(samples, TEST_PATH, seed)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--test", action="store_true",
                         help="학습 그리드 사이 온도에서 test용 데이터셋(xy_testset.npz) 생성")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="재현용 seed (기본: 실행마다 무작위, 사용한 값은 npz에 저장됨)")
     args = parser.parse_args()
 
     if args.test:
-        main_test()
+        main_test(seed=args.seed)
     else:
-        main()
+        main(seed=args.seed)
