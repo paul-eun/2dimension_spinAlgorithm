@@ -119,6 +119,10 @@ def main(L=64, n_epochs=30, batch_size=32, lr=1e-3,
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"device: {device}")
 
+    # seed별 결과 저장 폴더
+    run_dir = os.path.join(RESULT_DIR, f"seed_{seed}")
+    os.makedirs(run_dir, exist_ok=True)
+
     # ---------- 1) 데이터 준비 ----------
     if quick_test:
         # 빠른 동작 확인용: 파일 없이 즉석에서 축소 규모로 생성
@@ -203,10 +207,9 @@ def main(L=64, n_epochs=30, batch_size=32, lr=1e-3,
         print(f"  T={t:.4f}  ->  예측 평균={test_pred[mask].mean():.3f}  "
               f"MAE={mae_t:.4f}  (샘플 {mask.sum()}개)")
 
-    os.makedirs(RESULT_DIR, exist_ok=True)
-    torch.save(best_state, os.path.join(RESULT_DIR, "best_model.pt"))
+    torch.save(best_state, os.path.join(run_dir, "best_model.pt"))
     np.savez(
-        os.path.join(RESULT_DIR, "history.npz"),
+        os.path.join(run_dir, "history.npz"),
         train_mse=np.array(history["train_mse"]),
         val_mse=np.array(history["val_mse"]),
         val_mae=np.array(history["val_mae"]),
@@ -221,9 +224,9 @@ def main(L=64, n_epochs=30, batch_size=32, lr=1e-3,
         "test_mae": float(test_mae),
         "temperature_mae": temperature_mae,
     }
-    with open(os.path.join(RESULT_DIR, "result.json"), "w", encoding="utf-8") as f:
+    with open(os.path.join(run_dir, "result.json"), "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2, ensure_ascii=False)
-    print(f"\n결과 저장 완료: {RESULT_DIR}")
+    print(f"\n결과 저장 완료: {run_dir}")
 
     return model, (test_pred, test_true)
 
