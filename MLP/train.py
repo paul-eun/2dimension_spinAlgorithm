@@ -105,8 +105,17 @@ def load_test_file():
 
 def main(n_epochs=100, batch_size=32, lr=1e-3, seed=42, val_index=None):
 
+    np.random.seed(seed)
     torch.manual_seed(seed)
-    device = torch.device("cpu")   # 입력이 숫자 1개라 CPU로 충분히 빠름
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    print(f"device: {device}")
+
+    if torch.cuda.is_available():
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+
+    print(f"seed: {seed}")
 
     # ---------- 1) 데이터 준비 ----------
     (tr_e, tr_T), (va_e, va_T) = load_train_val_files(val_index)
@@ -143,10 +152,33 @@ def main(n_epochs=100, batch_size=32, lr=1e-3, seed=42, val_index=None):
     # ---------- 4) 최종 테스트 평가 ----------
     _, last_mae, _, _ = evaluate(model, test_loader, criterion, device)
     model.load_state_dict(best_state)
+    os.makedirs("MLP/checkpoints", exist_ok=True)
+
+    checkpoint_path = f"MLP/checkpoints/mlp_best_seed{seed}.pt"
+
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "best_epoch": int(best_epoch),
+            "best_val_mae": float(best_val_mae),
+            "seed": int(seed),
+        },
+        checkpoint_path
+    )
+
+    print(f"best model 저장: {checkpoint_path}")
     test_mse, test_mae, test_pred, test_true = evaluate(model, test_loader, criterion, device)
     print(f"\n=== 최종 테스트 결과 ===")
-    print(f"마지막 epoch 모델:            test MAE={last_mae:.4f}")
-    print(f"val 최고 epoch({best_epoch}) 모델:  test MSE={test_mse:.4f}  test MAE={test_mae:.4f}")
+    print(
+        f"best validation: epoch={best_epoch}, "
+        f"val_MAE={best_val_mae:.4f}"
+    )
+    print(f"마지막 epoch 모델: test MAE={last_mae:.4f}")
+    print(
+        f"val 최고 epoch({best_epoch}) 모델: "
+        f"test MSE={test_mse:.4f}  "
+        f"test MAE={test_mae:.4f}"
+    )
 
     print("\n온도별 예측 (val 최고 epoch 모델, 실제 T -> 평균 예측 T ± 표준편차):")
     for t in sorted(set(test_true.round(4))):
@@ -159,9 +191,31 @@ def main(n_epochs=100, batch_size=32, lr=1e-3, seed=42, val_index=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--val", type=int, default=None,
-                        help="validation으로 쓸 데이터 파일 번호 (기본: 가장 마지막 번호)")
-    parser.add_argument("--epochs", type=int, default=100)
+
+    parser.add_argument(
+        "--val",
+        type=int,
+        default=None,
+        help="validation으로 쓸 데이터 파일 번호 (기본: 가장 마지막 번호)"
+    )
+
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=100
+    )
+
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="random seed"
+    )
+
     args = parser.parse_args()
 
-    main(n_epochs=args.epochs, val_index=args.val)
+    main(
+        n_epochs=args.epochs,
+        seed=args.seed,
+        val_index=args.val
+    )

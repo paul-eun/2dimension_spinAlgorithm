@@ -222,3 +222,10 @@ __marimo__/
 data/*.png
 CNN/results/
 MLP/results/
+
+# Model checkpoints
+CNN/checkpoints/
+MLP/checkpoints/
+
+# Experiment logs
+*.log
