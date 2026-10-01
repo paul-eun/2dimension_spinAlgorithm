@@ -5,7 +5,7 @@ data/generate_data.py 가 저장한 data/xy_dataset_<번호>.npz 들을 불러�
 cnn/dataset.py 로 감싸고 cnn/model.py 로 학습합니다.
 
 데이터 분할:
-    - train     : validation 파일을 뺀 나머지 xy_dataset_<번호>.npz (69개 온도 전부)
+    - train     : validation 파일을 뺀 나머지 xy_dataset_<번호>.npz (61개 온도 전부)
     - validation: xy_dataset_<번호>.npz 중 하나를 통째로 사용 (기본: 가장 마지막 번호).
                   학습 파일과 독립적으로 시뮬레이션된 스핀 배치임.
     - test      : data/xy_testset.npz ('python data/generate_data.py --test'로 생성).
