@@ -229,3 +229,10 @@ MLP/checkpoints/
 
 # Experiment logs
 *.log
+
+# Analysis outputs
+analysis/*.log
+analysis/*.png
+analysis/*.pdf
+analysis/*.npz
+analysis/__pycache__/
