@@ -37,10 +37,11 @@ from xy_model_numba import generate_dataset, build_temperature_grid  # noqa: E40
 DATA_DIR = os.path.dirname(os.path.abspath(__file__))
 TEST_PATH = os.path.join(DATA_DIR, "xy_testset.npz")
 
-# 학습 그리드(0.300, 0.325, ..., 1.800)의 정확히 한가운데 온도들, 0.15 간격
+# 학습 그리드(0.300, 0.325, ..., 2.000)의 정확히 한가운데 온도들, 0.15 간격
 # (0.8125, 0.9625가 T_BKT ~ 0.893 양옆)
 TEST_TEMPERATURES = [0.3625, 0.5125, 0.6625, 0.8125, 0.9625,
-                     1.1125, 1.2625, 1.4125, 1.5625, 1.7125]
+                     1.1125, 1.2625, 1.4125, 1.5625, 1.7125,
+                     1.8625]
 
 
 def dataset_path(index):

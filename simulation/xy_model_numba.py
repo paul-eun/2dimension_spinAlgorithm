@@ -210,9 +210,9 @@ class XYModel2DFast:
 # ---------------------------------------------------------------
 
 def build_temperature_grid():
-    """0.30~1.80 구간을 0.025 간격으로 촘촘한 균일 온도 그리드 (고온 -> 저온 순)."""
-    n_points = round((1.80 - 0.30) / 0.025) + 1  # 61개
-    grid = np.linspace(0.30, 1.80, n_points)
+    """0.30~2.00 구간을 0.025 간격으로 촘촘한 균일 온도 그리드 (고온 -> 저온 순)."""
+    n_points = round((2.00 - 0.30) / 0.025) + 1  # 69개
+    grid = np.linspace(0.30, 2.00, n_points)
     grid = sorted(set(round(float(t), 3) for t in grid), reverse=True)
     return grid
 

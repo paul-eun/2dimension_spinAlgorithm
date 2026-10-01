@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# XY model generated data / training outputs (regenerable, too large for git)
+*.npz
+data/*.png
+CNN/results/
+MLP/results/

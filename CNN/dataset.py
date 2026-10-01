@@ -19,10 +19,7 @@ class XYSpinDataset(Dataset):
             generate_dataset()이 반환한 리스트.
             각 원소는 {"T", "spin_config", ...} 형태의 dict.
         """
-        # (N, 2, L, L) 형태로 미리 쌓아둠 -- __getitem__마다 새로 변환하지 않도록
-        self.spin_configs = np.stack(
-            [s["spin_config"] for s in samples]
-        ).astype(np.float32)
+        self.spin_configs = [s["spin_config"] for s in samples]
         self.temperatures = np.array(
             [s["T"] for s in samples], dtype=np.float32
         )
@@ -31,7 +28,9 @@ class XYSpinDataset(Dataset):
         return len(self.temperatures)
 
     def __getitem__(self, idx):
-        x = torch.from_numpy(self.spin_configs[idx])   # (2, L, L)
+        x = torch.from_numpy(
+            np.ascontiguousarray(self.spin_configs[idx], dtype=np.float32)
+        )   # (2, L, L)
         y = torch.tensor(self.temperatures[idx])         # scalar
         return x, y
 
@@ -41,8 +40,6 @@ def load_dataset_npz(path):
     generate_data.py가 저장한 .npz 파일을 불러와서
     generate_dataset()이 반환하는 것과 같은 list[dict] 형태로 복원.
     """
-    # npz는 data["키"]로 접근할 때마다 배열 전체를 새로 압축 해제하므로,
-    # 반복문 밖에서 각 배열을 딱 한 번씩만 꺼내둠
     with np.load(path) as data:
         temps = data["temperatures"]
         spin_configs = data["spin_configs"]

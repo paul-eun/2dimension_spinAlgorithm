@@ -32,12 +32,7 @@ class XYTemperatureCNN(nn.Module):
                                padding_mode="circular", bias=False)
         self.bn3 = nn.BatchNorm2d(64)
 
-        # MaxPool 대신 AvgPool: 온도는 격자 전체의 "평균 밀도"
-        # (에너지 밀도, vortex 밀도)로 결정됨.
-        # - AvgPool은 밀도를 그대로 보존 (AvgPool 뒤 GAP = 그냥 GAP)
-        # - MaxPool은 2x2 안에 vortex가 2개여도 1개처럼 보여서,
-        #   vortex가 많은 고온 영역에서 밀도 정보가 포화됨
-        self.pool = nn.AvgPool2d(2)
+        self.pool = nn.MaxPool2d(2)
 
         # 위치와 무관하게 "격자 전체의 통계적 성질"만 보도록 GAP 사용
         # (Flatten 대신 -> 입력 크기(L)가 달라져도 구조를 그대로 재사용 가능)
