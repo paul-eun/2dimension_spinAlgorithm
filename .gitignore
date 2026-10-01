@@ -216,3 +216,23 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# XY model generated data / training outputs (regenerable, too large for git)
+*.npz
+data/*.png
+CNN/results/
+MLP/results/
+
+# Model checkpoints
+CNN/checkpoints/
+MLP/checkpoints/
+
+# Experiment logs
+*.log
+
+# Analysis outputs
+analysis/*.log
+analysis/*.png
+analysis/*.pdf
+analysis/*.npz
+analysis/__pycache__/
