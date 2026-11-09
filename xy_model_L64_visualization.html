@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>2D XY Model Monte Carlo Simulation (L=64)</title>
+<style>
+  body {
+    font-family: -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
+    background: #1a1a1a;
+    color: #e8e8e8;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 40px 20px;
+    margin: 0;
+  }
+  h1 {
+    font-size: 20px;
+    font-weight: 500;
+    margin: 0 0 4px;
+  }
+  .subtitle {
+    font-size: 13px;
+    color: #999;
+    margin: 0 0 24px;
+  }
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    max-width: 420px;
+    margin-bottom: 6px;
+  }
+  .controls label { font-size: 14px; color: #ccc; white-space: nowrap; }
+  .controls input[type=range] { flex: 1; }
+  .controls span { font-size: 16px; font-weight: 500; min-width: 52px; text-align: right; }
+  .legend {
+    font-size: 12px;
+    color: #999;
+    margin-bottom: 20px;
+  }
+  .bkt-bar {
+    position: relative;
+    width: 100%;
+    max-width: 420px;
+    height: 6px;
+    background: #333;
+    border-radius: 4px;
+    margin-bottom: 20px;
+  }
+  .bkt-mark {
+    position: absolute;
+    top: -4px;
+    width: 2px;
+    height: 14px;
+    background: #6ea8fe;
+  }
+  canvas {
+    background: #111;
+    border-radius: 8px;
+    max-width: 100%;
+  }
+  .stats {
+    display: flex;
+    gap: 12px;
+    justify-content: center;
+    margin-top: 20px;
+    flex-wrap: wrap;
+  }
+  .stat-card {
+    background: #242424;
+    border-radius: 8px;
+    padding: 12px 20px;
+    text-align: center;
+    min-width: 110px;
+  }
+  .stat-card .label { font-size: 12px; color: #999; }
+  .stat-card .value { font-size: 20px; font-weight: 500; margin-top: 2px; }
+</style>
+</head>
+<body>
+
+<h1>2D XY Model - Monte Carlo Metropolis Simulation</h1>
+<p class="subtitle">L = 64 (4096 spins) · Berezinskii-Kosterlitz-Thouless Phase Transition</p>
+
+<div class="controls">
+  <label>온도 T</label>
+  <input type="range" id="tSlider" min="0.1" max="2.0" step="0.02" value="1.0" />
+  <span id="tOut">1.00</span>
+</div>
+<div class="legend">
+  T_BKT ≈ 0.893 &nbsp;·&nbsp; <span style="color:#D85A30;">●</span> vortex &nbsp; <span style="color:#378ADD;">●</span> anti-vortex
+</div>
+<div class="bkt-bar">
+  <div class="bkt-mark" id="bktMark"></div>
+</div>
+
+<canvas id="spinCanvas"></canvas>
+
+<div class="stats">
+  <div class="stat-card">
+    <div class="label">벡터 자화도 |M|</div>
+    <div class="value" id="magOut">0.00</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">소용돌이 쌍 개수</div>
+    <div class="value" id="vortexOut">0</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">상태</div>
+    <div class="value" id="phaseOut" style="font-size:15px;">-</div>
+  </div>
+</div>
+
+<script>
+(function(){
+  const L = 64;
+  const J = 1.0;
+  const cell = 6;
+  const size = L * cell;
+  let theta = new Float64Array(L*L);
+  for (let i=0;i<L*L;i++) theta[i] = Math.random()*2*Math.PI;
+
+  const canvas = document.getElementById('spinCanvas');
+  canvas.width = size; canvas.height = size;
+  canvas.style.width = size + 'px';
+  canvas.style.height = size + 'px';
+  const ctx = canvas.getContext('2d');
+
+  const slider = document.getElementById('tSlider');
+  const tOut = document.getElementById('tOut');
+  const magOut = document.getElementById('magOut');
+  const vortexOut = document.getElementById('vortexOut');
+  const phaseOut = document.getElementById('phaseOut');
+  const bktMark = document.getElementById('bktMark');
+
+  const TMIN = 0.1, TMAX = 2.0, TBKT = 0.893;
+  bktMark.style.left = (((TBKT - TMIN)/(TMAX-TMIN))*100) + '%';
+
+  let T = parseFloat(slider.value);
+  tOut.textContent = T.toFixed(2);
+
+  function idx(i,j){ return ((i%L+L)%L)*L + ((j%L+L)%L); }
+
+  function localDelta(i,j,oldT,newT){
+    const up = theta[idx(i-1,j)], down = theta[idx(i+1,j)];
+    const left = theta[idx(i,j-1)], right = theta[idx(i,j+1)];
+    const sc = Math.cos(up)+Math.cos(down)+Math.cos(left)+Math.cos(right);
+    const ss = Math.sin(up)+Math.sin(down)+Math.sin(left)+Math.sin(right);
+    const Eold = -J*(Math.cos(oldT)*sc + Math.sin(oldT)*ss);
+    const Enew = -J*(Math.cos(newT)*sc + Math.sin(newT)*ss);
+    return Enew - Eold;
+  }
+
+  function sweep(temp){
+    const deltaMax = Math.max(0.4, Math.min(2.5, temp*1.8));
+    const steps = L*L;
+    for (let n=0;n<steps;n++){
+      const i = Math.floor(Math.random()*L);
+      const j = Math.floor(Math.random()*L);
+      const k = idx(i,j);
+      const oldT = theta[k];
+      const newT = (oldT + (Math.random()*2-1)*deltaMax) % (2*Math.PI);
+      const dE = localDelta(i,j,oldT,newT);
+      if (dE <= 0 || Math.random() < Math.exp(-dE/temp)) theta[k] = newT < 0 ? newT + 2*Math.PI : newT;
+    }
+  }
+
+  function wrapAngle(a){
+    while (a > Math.PI) a -= 2*Math.PI;
+    while (a < -Math.PI) a += 2*Math.PI;
+    return a;
+  }
+
+  function windingAt(i,j){
+    const t00 = theta[idx(i,j)];
+    const t01 = theta[idx(i,j+1)];
+    const t11 = theta[idx(i+1,j+1)];
+    const t10 = theta[idx(i+1,j)];
+    const d1 = wrapAngle(t01 - t00);
+    const d2 = wrapAngle(t11 - t01);
+    const d3 = wrapAngle(t10 - t11);
+    const d4 = wrapAngle(t00 - t10);
+    return Math.round((d1+d2+d3+d4)/(2*Math.PI));
+  }
+
+  function render(){
+    ctx.clearRect(0,0,size,size);
+    let mx=0,my=0;
+    const half = cell*0.4;
+    for (let i=0;i<L;i++){
+      for (let j=0;j<L;j++){
+        const th = theta[idx(i,j)];
+        mx += Math.cos(th); my += Math.sin(th);
+        const cx = j*cell + cell/2, cy = i*cell + cell/2;
+        const dx = Math.cos(th)*half, dy = Math.sin(th)*half;
+        const hue = ((th*180/Math.PI)+360)%360;
+        ctx.strokeStyle = `hsl(${hue},65%,50%)`;
+        ctx.lineWidth = 1.1;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(cx-dx, cy-dy);
+        ctx.lineTo(cx+dx, cy+dy);
+        ctx.stroke();
+      }
+    }
+
+    let vortexPairs = 0;
+    for (let i=0;i<L;i++){
+      for (let j=0;j<L;j++){
+        const w = windingAt(i,j);
+        if (w !== 0){
+          vortexPairs++;
+          const cx = j*cell + cell, cy = i*cell + cell;
+          ctx.beginPath();
+          ctx.arc(cx, cy, 2.2, 0, 2*Math.PI);
+          ctx.fillStyle = w > 0 ? '#D85A30' : '#378ADD';
+          ctx.fill();
+        }
+      }
+    }
+
+    const mag = Math.sqrt(mx*mx+my*my)/(L*L);
+    magOut.textContent = mag.toFixed(2);
+    vortexOut.textContent = Math.round(vortexPairs/2);
+    phaseOut.textContent = T < TBKT ? '준질서 (BKT 이하)' : '무질서 (BKT 이상)';
+  }
+
+  slider.addEventListener('input', () => {
+    T = parseFloat(slider.value);
+    tOut.textContent = T.toFixed(2);
+  });
+
+  function loop(){
+    sweep(T);
+    render();
+    requestAnimationFrame(loop);
+  }
+  loop();
+})();
+</script>
+</body>
+</html>
