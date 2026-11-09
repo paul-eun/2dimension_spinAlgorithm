@@ -236,3 +236,6 @@ analysis/*.png
 analysis/*.pdf
 analysis/*.npz
 analysis/__pycache__/
+
+# L256 generated datasets
+data/L256/

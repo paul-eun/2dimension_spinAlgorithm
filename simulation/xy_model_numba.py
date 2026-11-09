@@ -254,7 +254,10 @@ def generate_dataset(L=64, J=1.0, temperatures=None,
     model = XYModel2DFast(L=L, J=J, seed=seed)
     dataset = []
 
-    for T in temperatures:
+    start_time = time.time()
+    n_temperatures = len(temperatures)
+
+    for i_T, T in enumerate(temperatures, start=1):
         # --- burn-in: Wolff 알고리즘은 평형 도달이 압도적으로 빨라 50 sweep이면 충분함 ---
         model.run(T, n_burnin)
 
@@ -274,8 +277,31 @@ def generate_dataset(L=64, J=1.0, temperatures=None,
 
         if verbose:
             last = dataset[-1]
-            print(f"  T={T:.3f}  |M|={last['magnetization']:.3f}  "
-                  f"vortex={last['n_vortex']}  (샘플 {n_samples_per_T}개 수집 완료)")
+
+            elapsed = time.time() - start_time
+            avg_time_per_T = elapsed / i_T
+            remaining = avg_time_per_T * (n_temperatures - i_T)
+
+            elapsed_h = int(elapsed // 3600)
+            elapsed_m = int((elapsed % 3600) // 60)
+            elapsed_s = int(elapsed % 60)
+
+            eta_h = int(remaining // 3600)
+            eta_m = int((remaining % 3600) // 60)
+            eta_s = int(remaining % 60)
+
+            progress = 100.0 * i_T / n_temperatures
+
+            print(
+                f"[{i_T:2d}/{n_temperatures}] "
+                f"{progress:5.1f}% | "
+                f"T={T:.3f} | "
+                f"|M|={last['magnetization']:.3f} | "
+                f"vortex={last['n_vortex']} | "
+                f"elapsed={elapsed_h:02d}:{elapsed_m:02d}:{elapsed_s:02d} | "
+                f"ETA={eta_h:02d}:{eta_m:02d}:{eta_s:02d}",
+                flush=True,
+            )
 
     return dataset
 
