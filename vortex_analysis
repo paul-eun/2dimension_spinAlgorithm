@@ -1,0 +1,127 @@
+"""
+Vortex-antivortex 물리량 분석
+=============================
+
+정답 vortex map에서 샘플별 vortex/antivortex 위치를 뽑아내고, 온도별로
+
+  1. vortex(+antivortex) 밀도
+  2. vortex -> antivortex 최근접 거리 (periodic boundary, KDTree)
+
+를 집계한다.
+
+입력 npz는 vortex_maps (N, L, L) (+1=vortex, -1=antivortex, 0=없음)와
+temperatures (N,)를 담고 있어야 한다.
+
+사용 예
+-------
+    python vortex_physics.py --npz ../all_vortex_maps.npz
+    python vortex_physics.py --npz ../all_vortex_maps.npz --n-per-temp 4
+"""
+
+import argparse
+import time
+
+import numpy as np
+from scipy.spatial import cKDTree
+
+
+def positions_from_charge_map(charge):
+    """charge map (L, L), 값은 -1/0/+1 -> (vortex_pos (Nv, 2), antivortex_pos (Na, 2))."""
+    vortex_pos = np.argwhere(charge > 0).astype(np.float64)
+    antivortex_pos = np.argwhere(charge < 0).astype(np.float64)
+    return vortex_pos, antivortex_pos
+
+
+def nearest_pair_distance(vortex_pos, antivortex_pos, L):
+    """각 vortex에서 가장 가까운 antivortex까지의 periodic 거리 배열 (vortex 개수만큼 나옴)."""
+    if len(vortex_pos) == 0 or len(antivortex_pos) == 0:
+        return np.array([])
+    tree = cKDTree(antivortex_pos, boxsize=[L, L])
+    dist, _ = tree.query(vortex_pos, k=1)
+    return dist
+
+
+def analyze(npz_path, n_per_temp=4, seed=0):
+    d = np.load(npz_path, allow_pickle=True)
+    temps = d["temperatures"]
+    maps = d["vortex_maps"]
+    L = maps.shape[1]
+    get_positions = lambda i: positions_from_charge_map(maps[i])
+
+    n_vortex_ref = d["n_vortex"] if "n_vortex" in d.files else None
+    n_antivortex_ref = d["n_antivortex"] if "n_antivortex" in d.files else None
+
+    unique_T = np.unique(temps)
+    rng = np.random.default_rng(seed)
+
+    results = []
+    t0 = time.perf_counter()
+    for T in unique_T:
+        idx_all = np.flatnonzero(temps == T)
+        if n_per_temp is not None and n_per_temp >= 0 and n_per_temp < len(idx_all):
+            idx = rng.choice(idx_all, size=n_per_temp, replace=False)
+        else:
+            idx = idx_all
+
+        densities = []
+        pair_dists = []
+        for i in idx:
+            v_pos, av_pos = get_positions(i)
+
+            if n_vortex_ref is not None:
+                assert len(v_pos) == n_vortex_ref[i], (len(v_pos), n_vortex_ref[i])
+            if n_antivortex_ref is not None:
+                assert len(av_pos) == n_antivortex_ref[i], (len(av_pos), n_antivortex_ref[i])
+
+            densities.append(len(v_pos) + len(av_pos))
+            d_near = nearest_pair_distance(v_pos, av_pos, L)
+            if len(d_near) > 0:
+                pair_dists.append(d_near)
+
+        pair_dists = np.concatenate(pair_dists) if pair_dists else np.array([])
+        results.append({
+            "T": T,
+            "n_samples": len(idx),
+            "mean_total_vortex": np.mean(densities),
+            "std_total_vortex": np.std(densities),
+            "mean_nn_distance": pair_dists.mean() if len(pair_dists) else np.nan,
+            "std_nn_distance": pair_dists.std() if len(pair_dists) else np.nan,
+            "n_pairs": len(pair_dists),
+        })
+
+    elapsed = time.perf_counter() - t0
+    print(f"총 {sum(r['n_samples'] for r in results)}개 샘플 처리, {elapsed:.1f}초 소요 "
+          f"(JIT 컴파일 포함)\n")
+
+    header = f"{'T':>7} {'n':>4} {'mean(nv+nav)':>13} {'mean_nn_dist':>13} {'std_nn_dist':>12} {'n_pairs':>8}"
+    print(header)
+    for r in results:
+        print(f"{r['T']:7.3f} {r['n_samples']:4d} {r['mean_total_vortex']:13.2f} "
+              f"{r['mean_nn_distance']:13.3f} {r['std_nn_distance']:12.3f} {r['n_pairs']:8d}")
+
+    return results
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--npz", default="../all_vortex_maps.npz")
+    parser.add_argument("--n-per-temp", type=int, default=4,
+                         help="온도당 샘플 수 (-1이면 전체)")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--out", default=None, help="결과를 저장할 .npz 경로")
+    args = parser.parse_args()
+
+    n_per_temp = None if args.n_per_temp < 0 else args.n_per_temp
+    results = analyze(args.npz, n_per_temp=n_per_temp, seed=args.seed)
+
+    if args.out:
+        np.savez(
+            args.out,
+            T=np.array([r["T"] for r in results]),
+            mean_total_vortex=np.array([r["mean_total_vortex"] for r in results]),
+            std_total_vortex=np.array([r["std_total_vortex"] for r in results]),
+            mean_nn_distance=np.array([r["mean_nn_distance"] for r in results]),
+            std_nn_distance=np.array([r["std_nn_distance"] for r in results]),
+            n_pairs=np.array([r["n_pairs"] for r in results]),
+        )
+        print(f"\n저장: {args.out}")
