@@ -239,3 +239,16 @@ analysis/__pycache__/
 
 # L256 generated datasets
 data/L256/
+
+# vortexCNN: 작은 결과 파일(학습 곡선, confusion, helicity npz)과 로그는 포함,
+#            vortex 지도(vortexCNN/data/vortex_maps, 약 100 MB)는 스크립트로 다시 만들 수 있으므로 제외
+!vortexCNN/results/**/*.npz
+!vortexCNN/data/helicity/**/*.npz
+!vortexCNN/logs/*.log
+vortexCNN/data/vortex_maps/
+
+# 유한 크기 외삽용 스핀 데이터 (data/generate_parallel.py 로 생성)
+data/L32/
+data/L64/
+data/L128/
+data/gen_L*.log
